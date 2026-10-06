@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# mdview — open a Markdown file as a clean, styled page in its own app window.
+# Usage: mdview file.md
+set -euo pipefail
+
+src="$(realpath "${1:?usage: mdview file.md}")"
+dir="$(dirname "$src")"
+name="$(basename "$src")"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/mdview"
+mkdir -p "$cache"
+out="$cache/$(printf '%s' "$src" | md5sum | cut -c1-12).html"
+
+# ---- 1. Markdown -> HTML (fastest available converter wins) ----
+render() {
+  if command -v comrak >/dev/null 2>&1; then
+    comrak --gfm --unsafe -e footnotes -e math-dollars "$src" 2>/dev/null || comrak --gfm --unsafe "$src"
+  elif command -v cmark-gfm >/dev/null 2>&1; then
+    cmark-gfm --unsafe -e table -e strikethrough -e autolink -e tasklist "$src"
+  elif command -v pandoc >/dev/null 2>&1; then
+    pandoc -f gfm+tex_math_dollars+footnotes -t html --no-highlight --mathjax "$src"
+  else
+    echo "mdview: install one of: comrak, cmark-gfm, pandoc" >&2
+    exit 1
+  fi
+}
+
+esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+title="$(printf '%s' "$name" | esc)"
+# base href so relative images/links in the .md resolve from its own folder
+base="file://$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$dir/")"
+
+# Libraries: use local copies (installed by install-mdview.sh) when present, else CDN
+vendor="${XDG_DATA_HOME:-$HOME/.local/share}/mdview/vendor"
+lib() { [ -f "$vendor/$1" ] && printf 'file://%s/%s' "$vendor" "$1" || printf '%s' "$2"; }
+MERMAID="$(lib mermaid.min.js https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js)"
+HLJS="$(lib highlight.min.js https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js)"
+HL_LIGHT="$(lib github.min.css https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css)"
+HL_DARK="$(lib github-dark.min.css https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css)"
+
+# ---- 2. Wrap in a styled page ----
+{
+cat <<HTML
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="generator" content="mdview 3">
+<base href="$base"><title>$title</title>
+<link rel="stylesheet" media="(prefers-color-scheme: light)" href="$HL_LIGHT">
+<link rel="stylesheet" media="(prefers-color-scheme: dark)" href="$HL_DARK">
+<script>window.MDVIEW_LIBS={mermaid:"$MERMAID",hljs:"$HLJS"}</script>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--muted:#59636e;--border:#d1d9e0;--soft:#f6f8fa;--link:#0969da;--accent:#0969da}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--border:#3d444d;--soft:#151b23;--link:#4493f8;--accent:#4493f8}}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0 auto;max-width:860px;padding:48px 32px 96px;color:var(--fg);background:var(--bg);
+  font:16px/1.65 -apple-system,"Inter","Segoe UI","Noto Sans",Ubuntu,sans-serif;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4,h5,h6{line-height:1.25;margin:1.8em 0 .6em;font-weight:650;letter-spacing:-.01em}
+h1{font-size:2em;margin-top:0;padding-bottom:.3em;border-bottom:1px solid var(--border)}
+h2{font-size:1.5em;padding-bottom:.3em;border-bottom:1px solid var(--border)}
+h3{font-size:1.25em} h4{font-size:1em} h5,h6{font-size:.9em;color:var(--muted)}
+p,ul,ol,blockquote,pre,table{margin:0 0 1em}
+a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
+ul,ol{padding-left:1.8em} li+li{margin-top:.25em}
+li input[type=checkbox]{margin:0 .5em 0 -1.4em;vertical-align:middle}
+ul:has(>li input[type=checkbox]){list-style:none}
+blockquote{padding:.2em 1em;color:var(--muted);border-left:4px solid var(--border)}
+code{font:.875em/1.5 "JetBrains Mono","Fira Code",ui-monospace,Menlo,Consolas,monospace;
+  background:var(--soft);padding:.15em .4em;border-radius:6px}
+pre{background:var(--soft);border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow:auto}
+pre code{background:none;padding:0;font-size:.85em}
+pre code.hljs{background:none;padding:0}
+table{border-collapse:collapse;display:block;overflow:auto;width:max-content;max-width:100%}
+th,td{border:1px solid var(--border);padding:6px 13px}
+th{font-weight:600;background:var(--soft)} tr:nth-child(2n) td{background:var(--soft)}
+img{max-width:100%;border-radius:6px}
+hr{border:0;height:1px;background:var(--border);margin:2em 0}
+::selection{background:color-mix(in srgb,var(--accent) 30%,transparent)}
+@media print{body{max-width:none;padding:0}}
+kbd{font:.8em ui-monospace,monospace;padding:.15em .45em;border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;background:var(--soft)}
+mark{background:#fff8c5;color:inherit;padding:0 .2em;border-radius:3px}
+@media (prefers-color-scheme:dark){mark{background:#bb800926}}
+details{border:1px solid var(--border);border-radius:8px;padding:.6em 1em;margin:0 0 1em}
+summary{cursor:pointer;font-weight:600} details[open] summary{margin-bottom:.6em}
+h1:hover .anchor,h2:hover .anchor,h3:hover .anchor{opacity:1}
+.anchor{opacity:0;margin-left:.3em;color:var(--muted);font-weight:400}
+.footnotes,section.footnotes{font-size:.875em;color:var(--muted)}
+.mermaid{display:flex;justify-content:center;margin:0 0 1em;padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--soft);overflow:auto}
+/* GitHub-style alerts: > [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION] */
+.alert{border-left:4px solid var(--c);padding:.5em 1em;margin:0 0 1em;color:var(--fg);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--c) 7%,transparent)}
+.alert>:last-child{margin-bottom:0}
+.alert-title{font-weight:600;color:var(--c);margin-bottom:.25em!important}
+.alert.note{--c:#0969da}.alert.tip{--c:#1a7f37}.alert.important{--c:#8250df}.alert.warning{--c:#9a6700}.alert.caution{--c:#cf222e}
+@media (prefers-color-scheme:dark){.alert.note{--c:#4493f8}.alert.tip{--c:#3fb950}.alert.important{--c:#ab7df8}.alert.warning{--c:#d29922}.alert.caution{--c:#f85149}}
+</style></head><body><article>
+HTML
+render
+cat <<'HTML'
+</article>
+<script>
+(() => {
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const L = window.MDVIEW_LIBS;
+  const load = (src, cb) => { const s = document.createElement('script'); s.src = src; s.onload = cb;
+    s.onerror = () => console.warn('mdview: could not load', src); document.head.append(s); };
+  const css = href => { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href; document.head.append(l); };
+  const step = (name, fn) => { try { fn(); } catch (e) { console.error('mdview step failed:', name, e); } };
+  const icons = { note: 'ℹ️', tip: '💡', important: '❗', warning: '⚠️', caution: '🛑' };
+  // Code-block language, whichever converter made it:
+  // pandoc <pre class="js">, cmark-gfm <code class="language-js">, comrak <pre lang="js">
+  const langOf = pre => {
+    const c = pre.querySelector('code');
+    return (pre.getAttribute('lang') || (c && (c.className.match(/language-(\S+)/) || [])[1]) || pre.className.split(' ')[0] || '').toLowerCase();
+  };
+
+  // Esc closes the window. Keep history at one entry so Chrome allows window.close().
+  addEventListener('keydown', e => { if (e.key === 'Escape') window.close(); });
+  addEventListener('click', e => {
+    const a = e.target.closest('a[href]'); if (!a) return;
+    const href = a.getAttribute('href');
+    if (href.startsWith('#')) {
+      e.preventDefault();
+      const t = document.getElementById(decodeURIComponent(href.slice(1)));
+      if (t) { t.scrollIntoView({ behavior: 'smooth' }); history.replaceState(null, '', href); }
+    } else if (/^https?:/.test(href)) { a.target = '_blank'; a.rel = 'noopener'; }
+  });
+
+  step('anchors', () => {
+    // strip invisible emoji variation selectors so #links match heading ids
+    $$('[id]').forEach(e => { if (e.id.includes('️')) e.id = e.id.replace(/️/g, ''); });
+    $$('a[href^="#"]').forEach(a => a.setAttribute('href', a.getAttribute('href').replace(/️/g, '')));
+    const used = {};
+    $$('article h1,article h2,article h3,article h4').forEach(h => {
+      if (!h.id) {
+        const id = h.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s/g, '-');
+        h.id = used[id] ? `${id}-${used[id]}` : id; used[id] = (used[id] || 0) + 1;
+      }
+      const a = document.createElement('a'); a.className = 'anchor'; a.href = '#' + h.id; a.textContent = '#'; h.append(a);
+    });
+  });
+
+  step('alerts', () => {
+    $$('blockquote').forEach(bq => {
+      const p = bq.firstElementChild;
+      const m = p && p.innerHTML.match(/^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(<br\s*\/?>)?/i);
+      if (!m) return;
+      const t = m[1].toLowerCase(); p.innerHTML = p.innerHTML.slice(m[0].length);
+      if (!p.textContent.trim()) p.remove();
+      const d = document.createElement('div'); d.className = 'alert ' + t;
+      d.innerHTML = `<p class="alert-title">${icons[t]} ${t[0].toUpperCase() + t.slice(1)}</p>` + bq.innerHTML; bq.replaceWith(d);
+    });
+    // newer pandoc / comrak emit their own alert markup
+    $$('div.note,div.tip,div.important,div.warning,div.caution,div.markdown-alert').forEach(d => {
+      const t = ['note', 'tip', 'important', 'warning', 'caution'].find(k => d.className.includes(k)) || 'note';
+      d.className = 'alert ' + t;
+      const ti = d.querySelector('.title,.markdown-alert-title');
+      if (ti) { ti.className = 'alert-title'; ti.innerHTML = `${icons[t]} ${ti.textContent.trim()}`; }
+    });
+  });
+
+  step('mermaid', () => {
+    const blocks = $$('pre').filter(pre => langOf(pre) === 'mermaid');
+    if (!blocks.length) return;
+    blocks.forEach(pre => { const d = document.createElement('div'); d.className = 'mermaid'; d.textContent = pre.textContent; pre.replaceWith(d); });
+    load(L.mermaid, () => {
+      mermaid.initialize({ startOnLoad: false, theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'neutral' });
+      mermaid.run({ querySelector: 'div.mermaid' });
+    });
+  });
+
+  step('math', () => {
+    const math = $$('span.math, [data-math-style]');
+    if (!math.length) return;
+    css('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css');
+    load('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js', () => math.forEach(s => {
+      const disp = s.classList.contains('display') || s.dataset.mathStyle === 'display';
+      const tex = s.textContent.replace(/^\\[(\[]|\\[)\]]$/g, '');
+      try { katex.render(tex, s, { displayMode: disp, throwOnError: false }); } catch (e) {}
+    }));
+  });
+
+  step('highlight', () => {
+    const codes = $$('pre').map(pre => {
+      const c = pre.querySelector('code'); if (!c) return null;
+      const lang = langOf(pre);
+      if (lang && !c.className.includes('language-')) c.classList.add('language-' + lang);
+      return c;
+    }).filter(Boolean);
+    if (codes.length) load(L.hljs, () => codes.forEach(c => { try { hljs.highlightElement(c); } catch (e) {} }));
+  });
+})();
+</script>
+</body></html>
+HTML
+} > "$out"
+
+# ---- 3. Open in a chromeless app window ----
+for b in google-chrome-stable google-chrome chromium-browser chromium brave-browser microsoft-edge; do
+  if command -v "$b" >/dev/null 2>&1; then
+    nohup "$b" --app="file://$out" --window-size=980,1100 >/dev/null 2>&1 &
+    exit 0
+  fi
+done
+if command -v flatpak >/dev/null 2>&1 && flatpak info com.google.Chrome >/dev/null 2>&1; then
+  nohup flatpak run com.google.Chrome --app="file://$out" --window-size=980,1100 >/dev/null 2>&1 &
+  exit 0
+fi
+xdg-open "$out" >/dev/null 2>&1 &
